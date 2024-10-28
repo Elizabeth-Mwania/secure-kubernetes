@@ -1,0 +1,60 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Static Code Analysis
+        run: |
+          npm install -g eslint
+          eslint . || exit 1
+
+      - name: Build Docker Image
+        run: |
+          docker build -t secure-kubernetes:${{ github.sha }} .
+
+      - name: Push Docker Image to Docker Hub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          docker push secure-kubernetes:${{ github.sha }}
+
+  scan:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Pull Docker Image
+        run: docker pull secure-kubernetes:${{ github.sha }}
+
+      - name: Scan Docker Image for Vulnerabilities
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy secure-kubernetes:${{ github.sha }} || exit 1
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: scan
+    if: success()
+
+    steps:
+      - name: Deploy to Kubernetes
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          echo "${KUBE_CONFIG_DATA}" | base64 --decode > kubeconfig.yaml
+          kubectl --kubeconfig=kubeconfig.yaml set image deployment/secure-kubernetes secure-kubernetes=secure-kubernetes:${{ github.sha }}
+          kubectl --kubeconfig=kubeconfig.yaml rollout status deployment/secure-kubernetes
